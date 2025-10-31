@@ -1,0 +1,10 @@
+[package]
+name = "boringchain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+boringtun = { git = "https://github.com/firezone/boringtun", branch = "master" }
+etherparse = "0.19.0"
+serde = { version = "1.0.228", features = ["derive"] }
+toml = "0.9.8"
