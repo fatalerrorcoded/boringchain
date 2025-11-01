@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use tokio::time::{Duration, Instant};
 
 use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::handshake::parse_handshake_anon;
@@ -95,7 +95,7 @@ impl TunnelManager {
         let rate_limiter = Arc::new(RateLimiter::new_at(
             &public_key,
             HANDSHAKE_RATE_LIMIT,
-            Instant::now(),
+            Instant::now().into_std(),
         ));
 
         let mut peer_state = HashMap::new();
@@ -112,7 +112,7 @@ impl TunnelManager {
                 Index::new_local(index),
                 Some(rate_limiter.clone()),
                 rand::random(),
-                Instant::now(),
+                Instant::now().into_std(),
             );
 
             let server_peer = TunnelPeerState {
@@ -190,21 +190,22 @@ impl TunnelManager {
         dst: &mut [u8],
         send_out: Sender<Vec<u8>>,
     ) {
-        let packet =
-            match self
-                .rate_limiter
-                .verify_packet_at(Some(addr.ip()), src, dst, Instant::now())
-            {
-                Ok(packet) => packet,
-                Err(TunnResult::WriteToNetwork(cookie)) => {
-                    socket.send_to(cookie, &addr).await.ok();
-                    return;
-                }
-                Err(_) => {
-                    println!("Failed to parse incoming packet from {}", addr);
-                    return;
-                }
-            };
+        let packet = match self.rate_limiter.verify_packet_at(
+            Some(addr.ip()),
+            src,
+            dst,
+            Instant::now().into_std(),
+        ) {
+            Ok(packet) => packet,
+            Err(TunnResult::WriteToNetwork(cookie)) => {
+                socket.send_to(cookie, &addr).await.ok();
+                return;
+            }
+            Err(_) => {
+                println!("Failed to parse incoming packet from {}", addr);
+                return;
+            }
+        };
 
         let peer_mutex = match packet {
             boringtun::noise::Packet::HandshakeInit(init) => {
@@ -230,7 +231,7 @@ impl TunnelManager {
 
         match peer
             .tunnel
-            .decapsulate_at(Some(addr.ip()), src, dst, Instant::now())
+            .decapsulate_at(Some(addr.ip()), src, dst, Instant::now().into_std())
         {
             TunnResult::Done => (),
             TunnResult::Err(_) => (),
@@ -250,7 +251,8 @@ impl TunnelManager {
         peer.endpoint = Some(addr);
         if flush {
             while let TunnResult::WriteToNetwork(packet) =
-                peer.tunnel.decapsulate_at(None, &[], dst, Instant::now())
+                peer.tunnel
+                    .decapsulate_at(None, &[], dst, Instant::now().into_std())
             {
                 socket.send_to(packet, &addr).await.ok();
             }
@@ -276,7 +278,10 @@ impl TunnelManager {
         };
 
         let mut peer = peer_mutex.lock().await;
-        match peer.tunnel.encapsulate_at(data, dst, Instant::now()) {
+        match peer
+            .tunnel
+            .encapsulate_at(data, dst, Instant::now().into_std())
+        {
             TunnResult::Done => (),
             TunnResult::Err(_) => (),
             TunnResult::WriteToNetwork(packet) => {
@@ -292,7 +297,7 @@ impl TunnelManager {
 
     async fn run_limiter_timer(self: Arc<Self>) {
         loop {
-            self.rate_limiter.reset_count_at(Instant::now());
+            self.rate_limiter.reset_count_at(Instant::now().into_std());
             thread::sleep(Duration::from_secs(1));
         }
     }
@@ -306,7 +311,10 @@ impl TunnelManager {
                     continue;
                 };
 
-                match peer.tunnel.update_timers_at(&mut dst_buf, Instant::now()) {
+                match peer
+                    .tunnel
+                    .update_timers_at(&mut dst_buf, Instant::now().into_std())
+                {
                     TunnResult::Done => (),
                     TunnResult::Err(WireGuardError::ConnectionExpired) => {
                         peer.endpoint = peer.def.endpoint
