@@ -9,11 +9,14 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::rate_limiter::RateLimiter;
 use boringtun::noise::{Index, Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use futures::channel::mpsc::{self, Receiver, Sender};
-use futures::{SinkExt, StreamExt, future};
+use etherparse::SlicedPacket;
 use tokio::net::UdpSocket;
 use tokio::select;
-use tokio::sync::Mutex;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::{Mutex, mpsc};
+
+pub mod channel;
+pub use channel::*;
 
 use crate::config::ConfigServerPeer;
 
@@ -26,7 +29,6 @@ pub struct TunnelPeer {
     preshared_key: Option<[u8; 32]>,
     endpoint: Option<SocketAddr>,
     peer_address: Ipv4Addr,
-    allow_all: bool,
 }
 
 impl TunnelPeer {
@@ -35,14 +37,12 @@ impl TunnelPeer {
         preshared_key: Option<[u8; 32]>,
         endpoint: Option<SocketAddr>,
         peer_address: Ipv4Addr,
-        allow_all: bool,
     ) -> Self {
         TunnelPeer {
             public_key,
             preshared_key,
             endpoint,
             peer_address,
-            allow_all,
         }
     }
 }
@@ -54,7 +54,6 @@ impl From<&ConfigServerPeer> for TunnelPeer {
             peer.preshared_key,
             peer.endpoint,
             peer.peer_address,
-            false,
         )
     }
 }
@@ -74,10 +73,22 @@ pub struct TunnelManager {
 
     peers: HashMap<PublicKey, Mutex<TunnelPeerState>>,
     idx_to_peer: HashMap<u32, PublicKey>,
+    addr_to_peer: HashMap<Ipv4Addr, PublicKey>,
+    is_single: bool,
 }
 
 impl TunnelManager {
+    pub fn new_single(listen_port: u16, private_key: [u8; 32], peer: TunnelPeer) -> Arc<Self> {
+        let mut manager = TunnelManager::new_inner(listen_port, private_key, &[peer]);
+        manager.is_single = true;
+        Arc::new(manager)
+    }
+
     pub fn new(listen_port: u16, private_key: [u8; 32], peers: &[TunnelPeer]) -> Arc<Self> {
+        Arc::new(TunnelManager::new_inner(listen_port, private_key, peers))
+    }
+
+    fn new_inner(listen_port: u16, private_key: [u8; 32], peers: &[TunnelPeer]) -> Self {
         let private_key = StaticSecret::from(private_key);
         let public_key = PublicKey::from(&private_key);
 
@@ -89,6 +100,7 @@ impl TunnelManager {
 
         let mut peer_state = HashMap::new();
         let mut idx_to_peer = HashMap::new();
+        let mut addr_to_peer = HashMap::new();
         for peer in peers {
             let peer_public_key = PublicKey::from(peer.public_key);
             let index = rand::random::<u32>() & 0x00FFFFFF;
@@ -110,9 +122,10 @@ impl TunnelManager {
             };
             peer_state.insert(peer_public_key, Mutex::new(server_peer));
             idx_to_peer.insert(index, peer_public_key);
+            addr_to_peer.insert(peer.peer_address, peer_public_key);
         }
 
-        Arc::new(TunnelManager {
+        TunnelManager {
             listen_port,
             private_key,
             public_key,
@@ -120,19 +133,30 @@ impl TunnelManager {
 
             peers: peer_state,
             idx_to_peer,
-        })
+            addr_to_peer,
+            is_single: false,
+        }
     }
 
-    pub async fn run(self: Arc<Self>) {
+    pub async fn run(self: Arc<Self>) -> TunnelManagerChannel {
+        let (send_out, recv_out) = mpsc::channel(16);
+        let (send_in, recv_in) = mpsc::channel(16);
         let (send_timer_pkt, recv_timer_pkt) = mpsc::channel(16);
 
-        let socket_task = tokio::task::spawn(self.clone().run_socket(recv_timer_pkt));
-        let limiter_timer_task = tokio::task::spawn(self.clone().run_limiter_timer());
-        let peer_timer_task = tokio::task::spawn(self.clone().run_peer_timer(send_timer_pkt));
-        let _join = future::join3(socket_task, limiter_timer_task, peer_timer_task).await;
+        let _socket_task =
+            tokio::task::spawn(self.clone().run_socket(recv_in, send_out, recv_timer_pkt));
+        let _limiter_timer_task = tokio::task::spawn(self.clone().run_limiter_timer());
+        let _peer_timer_task = tokio::task::spawn(self.clone().run_peer_timer(send_timer_pkt));
+
+        TunnelManagerChannel::new(send_in, recv_out)
     }
 
-    async fn run_socket(self: Arc<Self>, mut recv_timer_pkt: Receiver<(SocketAddr, Vec<u8>)>) {
+    async fn run_socket(
+        self: Arc<Self>,
+        mut recv_in: Receiver<Vec<u8>>,
+        send_out: Sender<Vec<u8>>,
+        mut recv_timer_pkt: Receiver<(SocketAddr, Vec<u8>)>,
+    ) {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, self.listen_port))
             .await
             .expect("Failed to create server socket");
@@ -146,21 +170,25 @@ impl TunnelManager {
                         break;
                     };
 
-                    self.process_packet(&socket, addr, &src_buf[..amt], &mut dst_buf).await;
+                    self.process_incoming(&socket, addr, &src_buf[..amt], &mut dst_buf, send_out.clone()).await;
                 },
-                Some((addr, packet)) = recv_timer_pkt.next() => {
-                    socket.send_to(&packet, addr).await.ok();
+                Some(data) = recv_in.recv() => {
+                    self.process_outgoing(&socket, &data, &mut dst_buf).await;
                 }
+                Some((addr, packet)) = recv_timer_pkt.recv() => {
+                    socket.send_to(&packet, addr).await.ok();
+                },
             };
         }
     }
 
-    async fn process_packet(
+    async fn process_incoming(
         &self,
         socket: &UdpSocket,
         addr: SocketAddr,
         src: &[u8],
         dst: &mut [u8],
+        send_out: Sender<Vec<u8>>,
     ) {
         let packet =
             match self
@@ -212,8 +240,8 @@ impl TunnelManager {
             }
             TunnResult::WriteToTunnelV4(packet, ipv4_addr) => {
                 // reject packets from a client if their address is different
-                if ipv4_addr == peer.def.peer_address || peer.def.allow_all {
-                    println!("{:x?}", packet);
+                if ipv4_addr == peer.def.peer_address || self.is_single {
+                    send_out.send(Vec::from(packet)).await.ok();
                 }
             }
             TunnResult::WriteToTunnelV6(_, _) => (), // we do not support IPv6 (yet)
@@ -229,6 +257,39 @@ impl TunnelManager {
         }
     }
 
+    async fn process_outgoing(
+        &self,
+        socket: &UdpSocket,
+        data: &[u8],
+        dst: &mut [u8],
+    ) -> Option<()> {
+        let packet = SlicedPacket::from_ip(data).ok()?;
+        let net = packet.net?;
+        let ip = net.ipv4_ref()?;
+        let destination = ip.header().destination_addr();
+
+        let peer_mutex = if self.is_single {
+            self.peers.values().next()?
+        } else {
+            let mapping = self.addr_to_peer.get(&destination)?;
+            self.peers.get(mapping)?
+        };
+
+        let mut peer = peer_mutex.lock().await;
+        match peer.tunnel.encapsulate_at(data, dst, Instant::now()) {
+            TunnResult::Done => (),
+            TunnResult::Err(_) => (),
+            TunnResult::WriteToNetwork(packet) => {
+                if let Some(endpoint) = peer.endpoint {
+                    socket.send_to(packet, endpoint).await.ok();
+                }
+            }
+            _ => panic!("Unexpected result from encapsulate"),
+        };
+
+        Some(())
+    }
+
     async fn run_limiter_timer(self: Arc<Self>) {
         loop {
             self.rate_limiter.reset_count_at(Instant::now());
@@ -236,7 +297,7 @@ impl TunnelManager {
         }
     }
 
-    async fn run_peer_timer(self: Arc<Self>, mut timer_pkt: Sender<(SocketAddr, Vec<u8>)>) {
+    async fn run_peer_timer(self: Arc<Self>, timer_pkt: Sender<(SocketAddr, Vec<u8>)>) {
         let mut dst_buf = vec![0; MAX_UDP_SIZE];
         loop {
             for peer_mutex in self.peers.values() {
