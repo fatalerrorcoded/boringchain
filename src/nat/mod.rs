@@ -4,6 +4,9 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use etherparse::{LaxNetSlice, LaxSlicedPacket, SlicedPacket, TransportSlice};
 use tokio::time::{Duration, Instant};
 
+#[cfg(test)]
+mod test;
+
 pub struct AddressTranslator {
     public_address: Ipv4Addr,
     inward: HashMap<NatKey, NatEntry>,
