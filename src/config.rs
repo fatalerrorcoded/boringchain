@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
@@ -20,7 +20,9 @@ pub struct ConfigClient {
 
     #[serde_as(as = "Base64")]
     pub peer_public_key: [u8; 32],
-    pub peer_endpoint: SocketAddrV4,
+    #[serde_as(as = "Option<Base64>")]
+    pub peer_preshared_key: Option<[u8; 32]>,
+    pub peer_endpoint: SocketAddr,
 }
 
 #[serde_as]
@@ -42,5 +44,6 @@ pub struct ConfigServerPeer {
     pub public_key: [u8; 32],
     #[serde_as(as = "Option<Base64>")]
     pub preshared_key: Option<[u8; 32]>,
+    pub endpoint: Option<SocketAddr>,
     pub peer_address: Ipv4Addr,
 }

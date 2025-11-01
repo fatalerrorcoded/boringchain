@@ -24,6 +24,7 @@ const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we
 pub struct TunnelPeer {
     public_key: [u8; 32],
     preshared_key: Option<[u8; 32]>,
+    endpoint: Option<SocketAddr>,
     peer_address: Ipv4Addr,
     allow_all: bool,
 }
@@ -32,12 +33,14 @@ impl TunnelPeer {
     pub fn new(
         public_key: [u8; 32],
         preshared_key: Option<[u8; 32]>,
+        endpoint: Option<SocketAddr>,
         peer_address: Ipv4Addr,
         allow_all: bool,
     ) -> Self {
         TunnelPeer {
             public_key,
             preshared_key,
+            endpoint,
             peer_address,
             allow_all,
         }
@@ -49,6 +52,7 @@ impl From<&ConfigServerPeer> for TunnelPeer {
         TunnelPeer::new(
             peer.public_key,
             peer.preshared_key,
+            peer.endpoint,
             peer.peer_address,
             false,
         )
@@ -57,8 +61,8 @@ impl From<&ConfigServerPeer> for TunnelPeer {
 
 pub struct TunnelPeerState {
     tunnel: Tunn,
-    socket_addr: Option<SocketAddr>,
-    peer: TunnelPeer,
+    endpoint: Option<SocketAddr>,
+    def: TunnelPeer,
 }
 
 pub struct TunnelManager {
@@ -101,8 +105,8 @@ impl TunnelManager {
 
             let server_peer = TunnelPeerState {
                 tunnel,
-                socket_addr: None,
-                peer: peer.clone(),
+                endpoint: None,
+                def: peer.clone(),
             };
             peer_state.insert(peer_public_key, Mutex::new(server_peer));
             idx_to_peer.insert(index, peer_public_key);
@@ -193,10 +197,13 @@ impl TunnelManager {
             return;
         };
 
-        let mut peer_state = peer_mutex.lock().await;
+        let mut peer = peer_mutex.lock().await;
         let mut flush = false;
 
-        match peer_state.tunnel.decapsulate_at(Some(addr.ip()), src, dst, Instant::now()) {
+        match peer
+            .tunnel
+            .decapsulate_at(Some(addr.ip()), src, dst, Instant::now())
+        {
             TunnResult::Done => (),
             TunnResult::Err(_) => (),
             TunnResult::WriteToNetwork(packet) => {
@@ -205,17 +212,17 @@ impl TunnelManager {
             }
             TunnResult::WriteToTunnelV4(packet, ipv4_addr) => {
                 // reject packets from a client if their address is different
-                if ipv4_addr == peer_state.peer.peer_address || peer_state.peer.allow_all {
+                if ipv4_addr == peer.def.peer_address || peer.def.allow_all {
                     println!("{:x?}", packet);
                 }
             }
             TunnResult::WriteToTunnelV6(_, _) => (), // we do not support IPv6 (yet)
         }
 
-        peer_state.socket_addr = Some(addr);
+        peer.endpoint = Some(addr);
         if flush {
             while let TunnResult::WriteToNetwork(packet) =
-                peer_state.tunnel.decapsulate_at(None, &[], dst, Instant::now())
+                peer.tunnel.decapsulate_at(None, &[], dst, Instant::now())
             {
                 socket.send_to(packet, &addr).await.ok();
             }
@@ -234,13 +241,15 @@ impl TunnelManager {
         loop {
             for peer_mutex in self.peers.values() {
                 let mut peer = peer_mutex.lock().await;
-                let Some(socket_addr) = peer.socket_addr else {
+                let Some(socket_addr) = peer.endpoint else {
                     continue;
                 };
 
                 match peer.tunnel.update_timers_at(&mut dst_buf, Instant::now()) {
                     TunnResult::Done => (),
-                    TunnResult::Err(WireGuardError::ConnectionExpired) => peer.socket_addr = None,
+                    TunnResult::Err(WireGuardError::ConnectionExpired) => {
+                        peer.endpoint = peer.def.endpoint
+                    }
                     TunnResult::Err(_) => (),
                     TunnResult::WriteToNetwork(packet) => {
                         timer_pkt
