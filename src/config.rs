@@ -22,7 +22,7 @@ pub struct ConfigClient {
     pub peer_public_key: [u8; 32],
     #[serde_as(as = "Option<Base64>")]
     pub peer_preshared_key: Option<[u8; 32]>,
-    pub peer_endpoint: SocketAddr,
+    pub peer_endpoint: Option<SocketAddr>,
 }
 
 #[serde_as]
