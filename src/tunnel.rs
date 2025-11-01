@@ -15,29 +15,66 @@ use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::Mutex;
 
-use crate::config::ConfigServer;
+use crate::config::ConfigServerPeer;
 
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we can tolerate before using cookies
 
-pub async fn start_server_task(config: ConfigServer) {
-    ServerTask::create(config).run().await;
+#[derive(Clone)]
+pub struct TunnelPeer {
+    public_key: [u8; 32],
+    preshared_key: Option<[u8; 32]>,
+    peer_address: Ipv4Addr,
+    allow_all: bool,
 }
 
-struct ServerTask {
+impl TunnelPeer {
+    pub fn new(
+        public_key: [u8; 32],
+        preshared_key: Option<[u8; 32]>,
+        peer_address: Ipv4Addr,
+        allow_all: bool,
+    ) -> Self {
+        TunnelPeer {
+            public_key,
+            preshared_key,
+            peer_address,
+            allow_all,
+        }
+    }
+}
+
+impl From<&ConfigServerPeer> for TunnelPeer {
+    fn from(peer: &ConfigServerPeer) -> Self {
+        TunnelPeer::new(
+            peer.public_key,
+            peer.preshared_key,
+            peer.peer_address,
+            false,
+        )
+    }
+}
+
+pub struct TunnelPeerState {
+    tunnel: Tunn,
+    socket_addr: Option<SocketAddr>,
+    peer: TunnelPeer,
+}
+
+pub struct TunnelManager {
     listen_port: u16,
 
     private_key: StaticSecret,
     public_key: PublicKey,
     rate_limiter: Arc<RateLimiter>,
 
-    peers: HashMap<PublicKey, Mutex<ServerPeer>>,
+    peers: HashMap<PublicKey, Mutex<TunnelPeerState>>,
     idx_to_peer: HashMap<u32, PublicKey>,
 }
 
-impl ServerTask {
-    fn create(config: ConfigServer) -> Arc<Self> {
-        let private_key = StaticSecret::from(config.private_key);
+impl TunnelManager {
+    pub fn new(listen_port: u16, private_key: [u8; 32], peers: &[TunnelPeer]) -> Arc<Self> {
+        let private_key = StaticSecret::from(private_key);
         let public_key = PublicKey::from(&private_key);
 
         let rate_limiter = Arc::new(RateLimiter::new_at(
@@ -46,9 +83,9 @@ impl ServerTask {
             Instant::now(),
         ));
 
-        let mut peers = HashMap::new();
+        let mut peer_state = HashMap::new();
         let mut idx_to_peer = HashMap::new();
-        for peer in config.peers {
+        for peer in peers {
             let peer_public_key = PublicKey::from(peer.public_key);
             let index = rand::random::<u32>() & 0x00FFFFFF;
             let tunnel = Tunn::new_at(
@@ -62,28 +99,27 @@ impl ServerTask {
                 Instant::now(),
             );
 
-            let server_peer = ServerPeer {
+            let server_peer = TunnelPeerState {
                 tunnel,
                 socket_addr: None,
-                internal_addr: peer.peer_address,
+                peer: peer.clone(),
             };
-            peers.insert(peer_public_key, Mutex::new(server_peer));
+            peer_state.insert(peer_public_key, Mutex::new(server_peer));
             idx_to_peer.insert(index, peer_public_key);
         }
 
-        Arc::new(ServerTask {
-            listen_port: config.listen_port,
-
+        Arc::new(TunnelManager {
+            listen_port,
             private_key,
             public_key,
             rate_limiter,
 
-            peers,
+            peers: peer_state,
             idx_to_peer,
         })
     }
 
-    async fn run(self: Arc<Self>) {
+    pub async fn run(self: Arc<Self>) {
         let (send_timer_pkt, recv_timer_pkt) = mpsc::channel(16);
 
         let socket_task = tokio::task::spawn(self.clone().run_socket(recv_timer_pkt));
@@ -135,16 +171,14 @@ impl ServerTask {
                 Err(_) => {
                     println!("Failed to parse incoming packet from {}", addr);
                     return;
-                }   
+                }
             };
 
         let peer_mutex = match packet {
             boringtun::noise::Packet::HandshakeInit(init) => {
                 parse_handshake_anon(&self.private_key, &self.public_key, &init)
                     .ok()
-                    .and_then(|hh| {
-                        self.peers.get(&PublicKey::from(hh.peer_static_public))
-                    })
+                    .and_then(|hh| self.peers.get(&PublicKey::from(hh.peer_static_public)))
             }
             boringtun::noise::Packet::HandshakeResponse(res) => {
                 self.get_peer_by_idx(res.receiver_idx)
@@ -159,10 +193,10 @@ impl ServerTask {
             return;
         };
 
-        let mut peer = peer_mutex.lock().await;
+        let mut peer_state = peer_mutex.lock().await;
         let mut flush = false;
 
-        match peer.tunnel.decapsulate_at(None, src, dst, Instant::now()) {
+        match peer_state.tunnel.decapsulate_at(Some(addr.ip()), src, dst, Instant::now()) {
             TunnResult::Done => (),
             TunnResult::Err(_) => (),
             TunnResult::WriteToNetwork(packet) => {
@@ -171,17 +205,17 @@ impl ServerTask {
             }
             TunnResult::WriteToTunnelV4(packet, ipv4_addr) => {
                 // reject packets from a client if their address is different
-                if ipv4_addr == peer.internal_addr {
+                if ipv4_addr == peer_state.peer.peer_address || peer_state.peer.allow_all {
                     println!("{:x?}", packet);
                 }
-            },
+            }
             TunnResult::WriteToTunnelV6(_, _) => (), // we do not support IPv6 (yet)
         }
 
-        peer.socket_addr = Some(addr);
+        peer_state.socket_addr = Some(addr);
         if flush {
             while let TunnResult::WriteToNetwork(packet) =
-                peer.tunnel.decapsulate_at(None, &[], dst, Instant::now())
+                peer_state.tunnel.decapsulate_at(None, &[], dst, Instant::now())
             {
                 socket.send_to(packet, &addr).await.ok();
             }
@@ -221,15 +255,9 @@ impl ServerTask {
         }
     }
 
-    fn get_peer_by_idx(&self, idx: u32) -> Option<&Mutex<ServerPeer>> {
+    fn get_peer_by_idx(&self, idx: u32) -> Option<&Mutex<TunnelPeerState>> {
         let global_idx = idx >> 8;
         let key = self.idx_to_peer.get(&global_idx)?;
         self.peers.get(key)
     }
-}
-
-pub struct ServerPeer {
-    tunnel: Tunn,
-    socket_addr: Option<SocketAddr>,
-    internal_addr: Ipv4Addr,
 }
