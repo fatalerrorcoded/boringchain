@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
+use std::{env, fs};
 use std::net::Ipv4Addr;
 
 pub mod config;
@@ -16,7 +16,10 @@ use local::process_local;
 
 #[tokio::main]
 async fn main() {
-    let config_data = fs::read("./boringchain.toml").expect("No boringchain.toml config");
+    let mut args = env::args_os();
+    let config_path = args.nth(1).unwrap_or("./boringchain.toml".into());
+
+    let config_data = fs::read(&config_path).unwrap_or_else(|_| panic!("Failed to read config at {:?}", config_path));
     let config: Config = toml::from_slice(&config_data).expect("Invalid config");
 
     let client_peer = TunnelPeer::new(
