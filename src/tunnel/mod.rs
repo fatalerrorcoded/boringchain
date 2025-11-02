@@ -1,7 +1,7 @@
 use smoltcp::wire::Ipv4Packet;
 use tokio::sync::mpsc::error::TrySendError;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::time::{self, Duration, Instant};
 
@@ -31,7 +31,7 @@ const TIMER_TASK_BUF_SIZE: usize = 32;
 pub struct TunnelPeer {
     public_key: [u8; 32],
     preshared_key: Option<[u8; 32]>,
-    endpoint: Option<SocketAddr>,
+    endpoint: Option<String>,
     peer_address: Ipv4Addr,
 }
 
@@ -39,7 +39,7 @@ impl TunnelPeer {
     pub fn new(
         public_key: [u8; 32],
         preshared_key: Option<[u8; 32]>,
-        endpoint: Option<SocketAddr>,
+        endpoint: Option<String>,
         peer_address: Ipv4Addr,
     ) -> Self {
         TunnelPeer {
@@ -56,7 +56,7 @@ impl From<&ConfigServerPeer> for TunnelPeer {
         TunnelPeer::new(
             peer.public_key,
             peer.preshared_key,
-            peer.endpoint,
+            peer.endpoint.clone(),
             peer.peer_address,
         )
     }
@@ -121,7 +121,7 @@ impl TunnelManager {
 
             let server_peer = TunnelPeerState {
                 tunnel,
-                endpoint: peer.endpoint,
+                endpoint: Self::get_endpoint_addr(peer.endpoint.as_deref()),
                 def: peer.clone(),
             };
             peer_state.insert(peer_public_key, Mutex::new(server_peer));
@@ -320,7 +320,7 @@ impl TunnelManager {
                 {
                     TunnResult::Done => (),
                     TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                        peer.endpoint = peer.def.endpoint;
+                        peer.endpoint = Self::get_endpoint_addr(peer.def.endpoint.as_deref());
                     }
                     TunnResult::Err(_) => (),
                     TunnResult::WriteToNetwork(packet) => {
@@ -339,6 +339,21 @@ impl TunnelManager {
                 };
             }
             time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    fn get_endpoint_addr(endpoint: Option<&str>) -> Option<SocketAddr> {
+        let endpoint = endpoint?;
+        let addr = endpoint.to_socket_addrs();
+        match addr {
+            Ok(mut addr) => {
+                let ipv4 = addr.clone().find(|addr| addr.is_ipv4());
+                ipv4.or_else(|| addr.next())
+            },
+            Err(_) => {
+                println!("Failed to parse tunnel endpoint {}", endpoint);
+                None
+            }
         }
     }
 
