@@ -1,180 +1,147 @@
 use std::net::Ipv4Addr;
 
-use etherparse::{IcmpEchoHeader, Icmpv4Type, PacketBuilder, SlicedPacket};
-use etherparse::icmpv4::{DestUnreachableHeader, TimeExceededCode};
+use ingot::icmp::{IcmpV4, IcmpV4Type};
+use ingot::ip::Ipv4;
+use ingot::types::Emit;
+use ingot::udp::Udp;
+use ingot::{ip::IpProtocol, tcp::Tcp};
 
 use crate::nat::{AddressTranslator, NatKey, Protocol};
 
+const SOURCE_PORT: u16 = 1234;
+const DESTINATION_PORT: u16 = 5678;
+const ICMP_ID: u16 = 1357;
+
+const FAKE_IPV4_PKT_SRC: Ipv4Addr = Ipv4Addr::new(1, 2, 3, 4);
+const FAKE_IPV4_PKT_DST: Ipv4Addr = Ipv4Addr::new(5, 6, 7, 8);
+
+fn fake_ipv4_packet(protocol: IpProtocol) -> Ipv4 {
+    Ipv4 {
+        protocol,
+        source: FAKE_IPV4_PKT_SRC.into(),
+        destination: FAKE_IPV4_PKT_DST.into(),
+        ..Default::default()
+    }
+}
+
+fn fake_tcp_packet() -> Tcp {
+    Tcp {
+        source: SOURCE_PORT,
+        destination: DESTINATION_PORT,
+        ..Default::default()
+    }
+}
+
+fn fake_udp_packet() -> Udp {
+    Udp {
+        source: SOURCE_PORT,
+        destination: DESTINATION_PORT,
+        ..Default::default()
+    }
+}
+
 #[test]
 fn inward_key_tcp() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we receive a packet from the ip 1.1.1.1 to port 12345
-    let builder = PacketBuilder::ipv4([1, 1, 1, 1], [192, 168, 1, 1], 20).tcp(80, 12345, 0, 0);
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let tcp = fake_tcp_packet();
+    let data = tcp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_inward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Tcp, 12345, None));
+    let key = AddressTranslator::get_inward_key(IpProtocol::TCP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Tcp, DESTINATION_PORT, None));
 }
 
 #[test]
 fn inward_key_udp() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we receive a packet from the ip 1.1.1.1 to port 12345
-    let builder = PacketBuilder::ipv4([1, 1, 1, 1], [192, 168, 1, 1], 20).udp(53, 12345);
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let udp = fake_tcp_packet();
+    let data = udp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_inward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Udp, 12345, None));
+    let key = AddressTranslator::get_inward_key(IpProtocol::UDP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Udp, DESTINATION_PORT, None));
 }
 
 #[test]
 fn inward_key_icmp_echo() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we receive an icmp echo reply from the ip 1.1.1.1 with id 12345
-    let builder = PacketBuilder::ipv4([1, 1, 1, 1], [192, 168, 1, 1], 20)
-        .icmpv4(Icmpv4Type::EchoReply(IcmpEchoHeader { id: 12345, seq: 0 }));
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let id = u16::to_be_bytes(ICMP_ID);
+    let icmp = IcmpV4 {
+        ty: IcmpV4Type::ECHO_REPLY,
+        rest_of_hdr: [id[0], id[1], 0, 0],
+        code: 0,
+        checksum: 0,
+    };
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
+    let data = icmp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let key = nat
-        .get_inward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Icmp, 12345, None));
+    let key = AddressTranslator::get_inward_key(IpProtocol::ICMP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Icmp, ICMP_ID, None));
 }
 
 #[test]
 fn inward_key_icmp_error() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we receive a response from the router 1.2.3.4, saying that
-    // a packet sent to ip 1.1.1.1 from port 12345 timed out
-    let udp_builder = PacketBuilder::ipv4([192, 168, 1, 1], [1, 1, 1, 1], 3).udp(12345, 53);
-    let mut udp_data = Vec::with_capacity(udp_builder.size(0));
-    udp_builder.write(&mut udp_data, &[]).unwrap();
+    let icmp = IcmpV4 {
+        ty: IcmpV4Type::TIME_EXCEEDED,
+        rest_of_hdr: [0, 0, 0, 0],
+        code: 0,
+        checksum: 0,
+    };
 
-    let builder = PacketBuilder::ipv4([1, 2, 3, 4], [192, 168, 1, 1], 20).icmpv4(
-        Icmpv4Type::TimeExceeded(TimeExceededCode::TtlExceededInTransit),
-    );
-    let mut data = Vec::with_capacity(builder.size(udp_data.len()));
-    builder.write(&mut data, &udp_data).unwrap();
+    let data = (icmp, fake_ipv4_packet(IpProtocol::UDP), fake_udp_packet()).to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_inward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Udp, 12345, None));
+    let key = AddressTranslator::get_inward_key(IpProtocol::ICMP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Udp, SOURCE_PORT, None));
 }
 
 #[test]
 fn outward_key_tcp() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // outward: we send a packet from the ip 192:168.1.1 from port 12345
-    let builder = PacketBuilder::ipv4([192, 168, 1, 1], [1, 1, 1, 1], 20).tcp(12345, 80, 0, 0);
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let tcp = fake_tcp_packet();
+    let data = tcp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_outward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(
-        key,
-        NatKey::new(Protocol::Tcp, 12345, Some(Ipv4Addr::new(192, 168, 1, 1)))
-    );
+    let key = AddressTranslator::get_outward_key(IpProtocol::TCP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Tcp, SOURCE_PORT, Some(address)));
 }
 
 #[test]
 fn outward_key_udp() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // outward: we send a packet from the ip 192.168.1.1 from port 12345
-    let builder = PacketBuilder::ipv4([192, 168, 1, 1], [1, 1, 1, 1], 20).udp(12345, 53);
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let udp = fake_tcp_packet();
+    let data = udp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_outward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(
-        key,
-        NatKey::new(Protocol::Udp, 12345, Some(Ipv4Addr::new(192, 168, 1, 1)))
-    );
+    let key = AddressTranslator::get_outward_key(IpProtocol::UDP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Udp, SOURCE_PORT, Some(address)));
 }
 
 #[test]
 fn outward_key_icmp_echo() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we send an icmp echo request from the ip 1.1.1.1 with id 12345
-    let builder = PacketBuilder::ipv4([192, 168, 1, 1], [1, 1, 1, 1], 20)
-        .icmpv4(Icmpv4Type::EchoRequest(IcmpEchoHeader { id: 12345, seq: 0 }));
-    let mut data = Vec::with_capacity(builder.size(0));
-    builder.write(&mut data, &[]).unwrap();
+    let id = u16::to_be_bytes(ICMP_ID);
+    let icmp = IcmpV4 {
+        ty: IcmpV4Type::ECHO_REQUEST,
+        rest_of_hdr: [id[0], id[1], 0, 0],
+        code: 0,
+        checksum: 0,
+    };
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
+    let data = icmp.to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let key = nat
-        .get_outward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Icmp, 12345, Some(Ipv4Addr::new(192, 168, 1, 1))));
+    let key = AddressTranslator::get_outward_key(IpProtocol::ICMP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Icmp, ICMP_ID, Some(address)));
 }
 
 #[test]
 fn outward_key_icmp_error() {
-    let nat = AddressTranslator::new(Ipv4Addr::UNSPECIFIED);
-    // inward: we send a response to 1.2.3.4, saying that
-    // a packet received to port 12345 reached a closed port
-    let udp_builder = PacketBuilder::ipv4([1, 2, 3, 4], [192, 168, 1, 1], 20).udp(5678, 12345);
-    let mut udp_data = Vec::with_capacity(udp_builder.size(0));
-    udp_builder.write(&mut udp_data, &[]).unwrap();
+    let icmp = IcmpV4 {
+        ty: IcmpV4Type::DESTINATION_UNREACHABLE,
+        rest_of_hdr: [0, 0, 0, 0],
+        code: 0,
+        checksum: 0,
+    };
 
-    let builder = PacketBuilder::ipv4([192, 168, 1, 1], [1, 2, 3, 4], 20).icmpv4(
-        Icmpv4Type::DestinationUnreachable(DestUnreachableHeader::Port),
-    );
-    let mut data = Vec::with_capacity(builder.size(udp_data.len()));
-    builder.write(&mut data, &udp_data).unwrap();
+    let data = (icmp, fake_ipv4_packet(IpProtocol::UDP), fake_udp_packet()).to_vec();
+    let address = Ipv4Addr::UNSPECIFIED;
 
-    let packet = SlicedPacket::from_ip(&data).unwrap();
-    let net_slice = packet.net.unwrap();
-    let ip_slice = net_slice.ipv4_ref().unwrap();
-    let ip_source = ip_slice.header().source_addr();
-
-    let key = nat
-        .get_outward_key(packet.transport.unwrap(), ip_source)
-        .unwrap();
-    assert_eq!(key, NatKey::new(Protocol::Udp, 12345, Some(Ipv4Addr::new(192, 168, 1, 1))));
+    let key = AddressTranslator::get_outward_key(IpProtocol::ICMP, &data, address).unwrap();
+    assert_eq!(key, NatKey::new(Protocol::Udp, DESTINATION_PORT, Some(FAKE_IPV4_PKT_DST)));
 }

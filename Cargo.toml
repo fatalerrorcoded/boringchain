@@ -5,8 +5,8 @@ edition = "2024"
 
 [dependencies]
 boringtun = { git = "https://github.com/firezone/boringtun", branch = "master" }
-etherparse = "0.19.0"
 futures = "0.3.31"
+ingot = "0.1.1"
 rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_with = { version = "3.15.1", features = ["base64"] }
