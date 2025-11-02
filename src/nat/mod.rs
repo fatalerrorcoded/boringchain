@@ -35,7 +35,7 @@ impl AddressTranslator {
         let key = Self::get_outward_key(ipv4.next_header(), ipv4.payload_mut(), ip_source)?;
         let entry = self.outward.get_mut(&key);
 
-        if let Some(entry) = entry {
+        if let Some(entry) = entry && !entry.is_stale(Instant::now()) {
             let new_state = Self::translate_packet(
                 &mut ipv4,
                 Some(self.public_address),
@@ -78,6 +78,9 @@ impl AddressTranslator {
 
         let key = Self::get_inward_key(ipv4.next_header(), ipv4.payload_mut(), ip_source)?;
         let entry = self.inward.get_mut(&key)?; // drop incoming packet without corresponding nat entry
+        if entry.is_stale(Instant::now()) {
+            return None;
+        }
 
         let new_state = Self::translate_packet(
             &mut ipv4,
@@ -190,15 +193,21 @@ impl AddressTranslator {
 
         let starting_port: u16 = rand::random();
         let mut current_port = starting_port.wrapping_add(1);
+        let now = Instant::now();
         while current_port != starting_port {
             if current_port == 0 {
                 continue;
             }
 
-            if !self
-                .inward
-                .contains_key(&NatKey::new(protocol, wanted_port, None))
-            {
+            let inward_key = NatKey::new(protocol, wanted_port, None);
+            let (outward_key, is_stale) = match self.inward.get(&inward_key) {
+                Some(entry) => (entry.to_outward_key(), entry.is_stale(now)),
+                None => return Some(wanted_port),
+            };
+
+            if is_stale {
+                self.inward.remove(&inward_key);
+                self.outward.remove(&outward_key);
                 return Some(wanted_port);
             }
 

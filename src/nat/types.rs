@@ -87,7 +87,7 @@ impl NatEntry {
 }
 
 impl NatEntry {
-    pub fn timeout_at(&self) -> Instant {
+    pub fn is_stale(&self, now: Instant) -> bool {
         let timeout = match self.protocol_state {
             ProtocolState::TcpSynSent => Duration::from_secs(5),
             ProtocolState::TcpSynReceived => Duration::from_secs(5),
@@ -99,6 +99,6 @@ impl NatEntry {
             ProtocolState::Icmp => Duration::from_secs(10),
         };
 
-        self.last_activity + timeout
+        now > (self.last_activity + timeout)
     }
 }
