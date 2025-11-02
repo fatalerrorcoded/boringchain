@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::Ipv4Addr;
 
 use ingot::icmp::{IcmpV4Ref, IcmpV4Type, ValidIcmpV4};
 use ingot::ip::{IpProtocol, Ipv4Ref, ValidIpv4};
 use ingot::tcp::{TcpRef, ValidTcp};
 use ingot::types::HeaderParse;
 use ingot::udp::{UdpRef, ValidUdp};
-use tokio::time::{Duration, Instant};
+
+mod types;
+use types::*;
 
 #[cfg(test)]
 mod test;
@@ -121,66 +123,5 @@ impl AddressTranslator {
             }
             _ => None,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-enum Protocol {
-    Tcp,
-    Udp,
-    Icmp,
-}
-
-#[derive(Debug, Clone)]
-enum ProtocolState {
-    TcpSynSent,
-    TcpSynReceived,
-    TcpEstablished,
-    TcpClose,
-    Udp,
-    UdpStream,
-    Icmp,
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct NatKey {
-    protocol: Protocol,
-    port: u16,
-    originator: Option<Ipv4Addr>,
-}
-
-impl NatKey {
-    pub fn new(protocol: Protocol, port: u16, originator: Option<Ipv4Addr>) -> NatKey {
-        NatKey {
-            protocol,
-            port,
-            originator,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct NatEntry {
-    protocol: Protocol,
-    protocol_state: ProtocolState,
-    external_port: u16,
-    external_peer: Option<Ipv4Addr>,
-    internal: SocketAddrV4,
-    last_activity: Instant,
-}
-
-impl NatEntry {
-    pub fn timeout_at(&self) -> Instant {
-        let timeout = match self.protocol_state {
-            ProtocolState::TcpSynSent => Duration::from_secs(5),
-            ProtocolState::TcpSynReceived => Duration::from_secs(5),
-            ProtocolState::TcpEstablished => Duration::from_hours(2),
-            ProtocolState::TcpClose => Duration::from_secs(10),
-            ProtocolState::Udp => Duration::from_secs(30),
-            ProtocolState::UdpStream => Duration::from_mins(2),
-            ProtocolState::Icmp => Duration::from_secs(10),
-        };
-
-        self.last_activity + timeout
     }
 }
