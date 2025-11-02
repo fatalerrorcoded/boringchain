@@ -194,9 +194,11 @@ impl AddressTranslator {
 
                         let ipv4 = Ipv4Packet::new_unchecked(icmp_payload);
                         ipv4.verify_checksum().then_some(())?;
+                        // manually slice as this is a partial payload
+                        let inner_payload = &icmp_payload[IPV4_HEADER_LEN..];
                         Self::get_key(
                             ipv4.next_header(),
-                            ipv4.payload(),
+                            inner_payload,
                             ipv4.dst_addr(),
                             is_outward,
                             !reversed,
@@ -268,6 +270,9 @@ impl AddressTranslator {
 
         let src_addr = &ipv4.src_addr().into();
         let dst_addr = &ipv4.dst_addr().into();
+        // work around payload_mut() panicking if the packet is too short
+        let original_len = ipv4.total_len();
+        ipv4.set_total_len(ipv4.as_ref().len() as u16);
 
         let new_state = match ipv4.next_header() {
             IpProtocol::Tcp => {
@@ -339,6 +344,8 @@ impl AddressTranslator {
             _ => None,
         };
 
+        // reset original length
+        ipv4.set_total_len(original_len);
         if new_state.is_some() {
             ipv4.fill_checksum();
         }
