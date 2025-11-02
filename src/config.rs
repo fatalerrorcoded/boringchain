@@ -46,4 +46,9 @@ pub struct ConfigServerPeer {
     pub preshared_key: Option<[u8; 32]>,
     pub endpoint: Option<SocketAddr>,
     pub peer_address: Ipv4Addr,
+
+    #[serde(default)]
+    pub tcp_port_forward: Vec<u16>,
+    #[serde(default)]
+    pub udp_port_forward: Vec<u16>,
 }
