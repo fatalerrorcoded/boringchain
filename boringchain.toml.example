@@ -17,3 +17,6 @@ public_key = "J59LJ20aOeORMQamYiNB/KCgMHXyE2vVU50wao6yY2I="
 preshared_key = "hJFWQoRdoyOYHZxb7ycd2sAmgFpr9eHBBST5IzxBph4=" # optional
 endpoint = "1.2.3.4:51820" # optional
 peer_address = "192.168.123.2"
+
+tcp_port_forward = [8080]
+udp_port_forward = [8080]

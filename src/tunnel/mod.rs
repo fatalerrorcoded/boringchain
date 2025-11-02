@@ -121,7 +121,7 @@ impl TunnelManager {
 
             let server_peer = TunnelPeerState {
                 tunnel,
-                endpoint: None,
+                endpoint: peer.endpoint,
                 def: peer.clone(),
             };
             peer_state.insert(peer_public_key, Mutex::new(server_peer));

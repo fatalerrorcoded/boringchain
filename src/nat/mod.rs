@@ -9,20 +9,24 @@ use tokio::time::Instant;
 
 mod types;
 use types::*;
+pub use types::Protocol;
 
 #[cfg(test)]
 mod test;
 
 pub struct AddressTranslator {
     public_address: Ipv4Addr,
+    port_forward: HashMap<(Protocol, u16), Ipv4Addr>,
+
     inward: HashMap<NatKey, NatEntry>,
     outward: HashMap<NatKey, NatEntry>,
 }
 
 impl AddressTranslator {
-    pub fn new(public_address: Ipv4Addr) -> Self {
+    pub fn new(public_address: Ipv4Addr, port_forward: HashMap<(Protocol, u16), Ipv4Addr>) -> Self {
         AddressTranslator {
             public_address,
+            port_forward,
             inward: HashMap::new(),
             outward: HashMap::new(),
         }
@@ -33,9 +37,23 @@ impl AddressTranslator {
         let ip_source = ipv4.src_addr();
 
         let key = Self::get_outward_key(ipv4.next_header(), ipv4.payload_mut(), ip_source)?;
-        let entry = self.outward.get_mut(&key);
+        if let Some(forward_entry) = self.port_forward.get(&(key.protocol, key.port))
+            && *forward_entry == ip_source
+        {
+            Self::translate_packet(
+                &mut ipv4,
+                Some(self.public_address),
+                None,
+                None,
+                None,
+            )?;
+            return Some(());
+        }
 
-        if let Some(entry) = entry && !entry.is_stale(Instant::now()) {
+        let entry = self.outward.get_mut(&key);
+        if let Some(entry) = entry
+            && !entry.is_stale(Instant::now())
+        {
             let translate_state = Self::translate_packet(
                 &mut ipv4,
                 Some(self.public_address),
@@ -67,6 +85,11 @@ impl AddressTranslator {
             last_activity: Instant::now(),
         };
 
+        println!(
+            "Inserting NAT entry {:?} [{}] -> [{}]",
+            entry.protocol, entry.internal, entry.external_port
+        );
+
         self.inward.insert(entry.to_inward_key(), entry.clone());
         self.outward.insert(entry.to_outward_key(), entry);
         Some(())
@@ -77,6 +100,17 @@ impl AddressTranslator {
         let ip_source = ipv4.src_addr();
 
         let key = Self::get_inward_key(ipv4.next_header(), ipv4.payload_mut(), ip_source)?;
+        if let Some(forward_entry) = self.port_forward.get(&(key.protocol, key.port)) {
+            Self::translate_packet(
+                &mut ipv4,
+                None,
+                Some(*forward_entry),
+                None,
+                None,
+            )?;
+            return Some(());
+        }
+
         let entry = self.inward.get_mut(&key)?; // drop incoming packet without corresponding nat entry
         if entry.is_stale(Instant::now()) {
             return None;

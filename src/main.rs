@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::net::Ipv4Addr;
 
@@ -9,7 +10,7 @@ pub mod tunnel;
 use config::Config;
 use tokio::select;
 
-use crate::nat::AddressTranslator;
+use crate::nat::{AddressTranslator, Protocol};
 use crate::tunnel::{TunnelManager, TunnelPeer};
 use local::process_local;
 
@@ -41,7 +42,17 @@ async fn main() {
     .run()
     .await;
 
-    let mut nat = AddressTranslator::new(config.client.address);
+    let mut port_forward = HashMap::new();
+    for peer in config.server.peers.iter() {
+        for tcp_port in peer.tcp_port_forward.iter() {
+            port_forward.insert((Protocol::Tcp, *tcp_port), peer.peer_address);
+        };
+
+        for udp_port in peer.udp_port_forward.iter() {
+            port_forward.insert((Protocol::Udp, *udp_port), peer.peer_address);
+        };
+    }
+    let mut nat = AddressTranslator::new(config.client.address, port_forward);
 
     loop {
         select! {

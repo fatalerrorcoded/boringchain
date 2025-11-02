@@ -53,7 +53,6 @@ impl ProtocolState {
     pub fn update_state(&mut self, translate_state: TranslateState) {
         use ProtocolState as PS;
         use TranslateState as TS;
-        let old = self.clone();
         *self = match (*self, translate_state) {
             (PS::TcpSynSent, TS::TcpSynAck) => PS::TcpSynReceived,
             (PS::TcpSynReceived, TS::TcpAck) => PS::TcpEstablished,
