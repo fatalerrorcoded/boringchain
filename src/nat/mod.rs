@@ -8,8 +8,8 @@ use smoltcp::wire::{
 use tokio::time::Instant;
 
 mod types;
-use types::*;
 pub use types::Protocol;
+use types::*;
 
 #[cfg(test)]
 mod test;
@@ -40,13 +40,7 @@ impl AddressTranslator {
         if let Some(forward_entry) = self.port_forward.get(&(key.protocol, key.port))
             && *forward_entry == ip_source
         {
-            Self::translate_packet(
-                &mut ipv4,
-                Some(self.public_address),
-                None,
-                None,
-                None,
-            )?;
+            Self::translate_packet(&mut ipv4, Some(self.public_address), None, None, None)?;
             return Some(());
         }
 
@@ -101,13 +95,7 @@ impl AddressTranslator {
 
         let key = Self::get_inward_key(ipv4.next_header(), ipv4.payload_mut(), ip_source)?;
         if let Some(forward_entry) = self.port_forward.get(&(key.protocol, key.port)) {
-            Self::translate_packet(
-                &mut ipv4,
-                None,
-                Some(*forward_entry),
-                None,
-                None,
-            )?;
+            Self::translate_packet(&mut ipv4, None, Some(*forward_entry), None, None)?;
             return Some(());
         }
 
@@ -260,16 +248,18 @@ impl AddressTranslator {
         src_port: Option<u16>,
         dest_port: Option<u16>,
     ) -> Option<TranslateState> {
+        let old_src = ipv4.src_addr();
         if let Some(src) = src {
             ipv4.set_src_addr(src);
         }
 
+        let old_dst = ipv4.dst_addr();
         if let Some(dest) = dest {
             ipv4.set_dst_addr(dest);
         }
 
-        let src_addr = &ipv4.src_addr().into();
-        let dst_addr = &ipv4.dst_addr().into();
+        let new_src = ipv4.src_addr();
+        let new_dst = ipv4.dst_addr();
         // work around payload_mut() panicking if the packet is too short
         let original_len = ipv4.total_len();
         ipv4.set_total_len(ipv4.as_ref().len() as u16);
@@ -278,13 +268,24 @@ impl AddressTranslator {
             IpProtocol::Tcp => {
                 let mut tcp = TcpPacket::new_unchecked(ipv4.payload_mut());
                 if let Some(src_port) = src_port {
+                    tcp.set_checksum(Self::new_checksum_for_u16(
+                        tcp.checksum(),
+                        tcp.src_port(),
+                        src_port,
+                    ));
                     tcp.set_src_port(src_port);
                 }
                 if let Some(dest_port) = dest_port {
+                    tcp.set_checksum(Self::new_checksum_for_u16(
+                        tcp.checksum(),
+                        tcp.dst_port(),
+                        dest_port,
+                    ));
                     tcp.set_dst_port(dest_port);
                 }
 
-                tcp.fill_checksum(src_addr, dst_addr);
+                tcp.set_checksum(Self::new_checksum_for_addr(tcp.checksum(), old_src, new_src));
+                tcp.set_checksum(Self::new_checksum_for_addr(tcp.checksum(), old_dst, new_dst));
                 match tcp {
                     _ if tcp.rst() => Some(TranslateState::TcpRst),
                     _ if tcp.fin() && tcp.ack() => Some(TranslateState::TcpFinAck),
@@ -298,12 +299,24 @@ impl AddressTranslator {
             IpProtocol::Udp => {
                 let mut udp = UdpPacket::new_unchecked(ipv4.payload_mut());
                 if let Some(src_port) = src_port {
+                    udp.set_checksum(Self::new_checksum_for_u16(
+                        udp.checksum(),
+                        udp.src_port(),
+                        src_port,
+                    ));
                     udp.set_src_port(src_port);
                 }
                 if let Some(dest_port) = dest_port {
+                    udp.set_checksum(Self::new_checksum_for_u16(
+                        udp.checksum(),
+                        udp.dst_port(),
+                        dest_port,
+                    ));
                     udp.set_dst_port(dest_port);
                 }
-                udp.fill_checksum(src_addr, dst_addr);
+
+                udp.set_checksum(Self::new_checksum_for_addr(udp.checksum(), old_src, new_src));
+                udp.set_checksum(Self::new_checksum_for_addr(udp.checksum(), old_dst, new_dst));
                 Some(TranslateState::Udp)
             }
             IpProtocol::Icmp => {
@@ -350,5 +363,27 @@ impl AddressTranslator {
             ipv4.fill_checksum();
         }
         new_state
+    }
+
+    fn new_checksum_for_addr(checksum: u16, old_value: Ipv4Addr, new_value: Ipv4Addr) -> u16 {
+        let old_value_high = (old_value.to_bits() >> 16) as u16;
+        let old_value_low = (old_value.to_bits() & 0xFFFF) as u16;
+
+        let new_value_high = (new_value.to_bits() >> 16) as u16;
+        let new_value_low = (new_value.to_bits() & 0xFFFF) as u16;
+
+        let checksum = Self::new_checksum_for_u16(checksum, old_value_low, new_value_low);
+        Self::new_checksum_for_u16(checksum, old_value_high, new_value_high)
+    }
+
+    fn new_checksum_for_u16(checksum: u16, old_value: u16, new_value: u16) -> u16 {
+        let checksum = (!checksum as u32)
+            .wrapping_add(!old_value as u32)
+            .wrapping_add(new_value as u32);
+
+        // fold 32-bit back into 16 bits
+        let sum = (checksum & 0xFFFF) + (checksum >> 16);
+        let sum = (sum & 0xFFFF) + (sum >> 16);
+        !(sum as u16)
     }
 }
