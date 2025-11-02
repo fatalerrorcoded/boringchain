@@ -9,7 +9,7 @@ pub enum Protocol {
     Icmp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ProtocolState {
     TcpSynSent,
     TcpSynReceived,
@@ -21,11 +21,32 @@ pub enum ProtocolState {
     Icmp,
 }
 
+impl ProtocolState {
+    pub fn update_state(&mut self, new_state: Self) {
+        *self = match (*self, new_state) {
+            (ProtocolState::TcpSynSent, ProtocolState::TcpSynReceived) => new_state,
+            (ProtocolState::TcpSynReceived, ProtocolState::TcpEstablished) => new_state,
+            // any move from established to closing is allowed
+            (
+                ProtocolState::TcpSynSent
+                | ProtocolState::TcpSynReceived
+                | ProtocolState::TcpEstablished,
+                ProtocolState::TcpClosing | ProtocolState::TcpClosed,
+            ) => new_state,
+            // an ack received when closing means that we have finished closing
+            (ProtocolState::TcpClosing, ProtocolState::TcpEstablished) => ProtocolState::TcpClosed,
+            // a second UDP packet means we have likely established a stream
+            (ProtocolState::Udp, ProtocolState::Udp) => ProtocolState::UdpStream,
+            _ => *self,
+        };
+    }
+}
+
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct NatKey {
-    protocol: Protocol,
-    port: u16,
-    originator: Option<Ipv4Addr>,
+    pub protocol: Protocol,
+    pub port: u16,
+    pub originator: Option<Ipv4Addr>,
 }
 
 impl NatKey {
@@ -40,11 +61,11 @@ impl NatKey {
 
 #[derive(Debug, Clone)]
 pub struct NatEntry {
-    protocol: Protocol,
-    protocol_state: ProtocolState,
-    external_port: u16,
-    internal: SocketAddrV4,
-    last_activity: Instant,
+    pub protocol: Protocol,
+    pub protocol_state: ProtocolState,
+    pub external_port: u16,
+    pub internal: SocketAddrV4,
+    pub last_activity: Instant,
 }
 
 impl NatEntry {
