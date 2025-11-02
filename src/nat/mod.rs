@@ -1,7 +1,11 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
 
-use etherparse::{LaxNetSlice, LaxSlicedPacket, SlicedPacket, TransportSlice};
+use ingot::icmp::{IcmpV4Ref, IcmpV4Type, ValidIcmpV4};
+use ingot::ip::{IpProtocol, Ipv4Ref, ValidIpv4};
+use ingot::tcp::{TcpRef, ValidTcp};
+use ingot::types::HeaderParse;
+use ingot::udp::{UdpRef, ValidUdp};
 use tokio::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -22,51 +26,48 @@ impl AddressTranslator {
         }
     }
 
-    pub fn translate_outward(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let packet = SlicedPacket::from_ip(data).ok()?;
-        let net_slice = packet.net?;
-        let ip_slice = net_slice.ipv4_ref()?;
-        let ip_source = ip_slice.header().source_addr();
+    pub fn translate_outward(&mut self, data: &mut [u8]) -> Option<()> {
+        let (mut ipv4, _, rest) = ValidIpv4::parse(data).ok()?;
+        let ip_source = ipv4.source().into();
 
-        let key = self.get_outward_key(packet.transport?, ip_source)?;
+        let key = Self::get_outward_key(ipv4.protocol(), rest, ip_source)?;
         let entry = self.outward.get(&key);
 
-        Some(Vec::new())
+        Some(())
     }
 
-    pub fn translate_inward(&mut self, data: &[u8]) -> Option<Vec<u8>> {
-        let packet = SlicedPacket::from_ip(data).ok()?;
-        let net_slice = packet.net?;
-        let ip_slice = net_slice.ipv4_ref()?;
-        let ip_source = ip_slice.header().source_addr();
+    pub fn translate_inward(&mut self, data: &mut [u8]) -> Option<()> {
+        let (mut ipv4, _, rest) = ValidIpv4::parse(data).ok()?;
+        let ip_source = ipv4.source().into();
 
-        let key = self.get_inward_key(packet.transport?, ip_source)?;
+        let key = Self::get_inward_key(ipv4.protocol(), rest, ip_source)?;
         let entry = self.inward.get(&key)?; // drop incoming packet without corresponding nat entry
 
-        Some(Vec::new())
+        Some(())
     }
 
-    fn get_inward_key(&self, transport: TransportSlice<'_>, source: Ipv4Addr) -> Option<NatKey> {
-        self.get_key(transport, source, false, false)
+    fn get_inward_key(hint: IpProtocol, rest: &[u8], source: Ipv4Addr) -> Option<NatKey> {
+        Self::get_key(hint, rest, source, false, false)
     }
 
-    fn get_outward_key(&self, transport: TransportSlice<'_>, source: Ipv4Addr) -> Option<NatKey> {
-        self.get_key(transport, source, true, true)
+    fn get_outward_key(hint: IpProtocol, rest: &[u8], source: Ipv4Addr) -> Option<NatKey> {
+        Self::get_key(hint, rest, source, true, true)
     }
 
     fn get_key(
-        &self,
-        transport: TransportSlice<'_>,
+        hint: IpProtocol,
+        rest: &[u8],
         source: Ipv4Addr,
         is_outward: bool,
         reversed: bool,
     ) -> Option<NatKey> {
-        match transport {
-            etherparse::TransportSlice::Tcp(tcp) => {
+        match hint {
+            IpProtocol::TCP => {
+                let (tcp, ..) = ValidTcp::parse(rest).ok()?;
                 let port = if reversed {
-                    tcp.source_port()
+                    tcp.source()
                 } else {
-                    tcp.destination_port()
+                    tcp.destination()
                 };
                 Some(NatKey::new(
                     Protocol::Tcp,
@@ -74,11 +75,12 @@ impl AddressTranslator {
                     is_outward.then_some(source),
                 ))
             }
-            etherparse::TransportSlice::Udp(udp) => {
+            IpProtocol::UDP => {
+                let (udp, ..) = ValidUdp::parse(rest).ok()?;
                 let port = if reversed {
-                    udp.source_port()
+                    udp.source()
                 } else {
-                    udp.destination_port()
+                    udp.destination()
                 };
                 // if outward, provide originator - ensures correct NAT operation
                 // if inward, do not provide originator - this turns NAT from symmetric to full cone
@@ -88,40 +90,36 @@ impl AddressTranslator {
                     is_outward.then_some(source),
                 ))
             }
-            etherparse::TransportSlice::Icmpv4(icmp) => match icmp.icmp_type() {
-                etherparse::Icmpv4Type::Unknown { .. } => None,
-                etherparse::Icmpv4Type::DestinationUnreachable(_)
-                | etherparse::Icmpv4Type::Redirect(_)
-                | etherparse::Icmpv4Type::TimeExceeded(_)
-                | etherparse::Icmpv4Type::ParameterProblem(_) => {
-                    let inner_packet = LaxSlicedPacket::from_ip(icmp.payload()).ok()?;
-                    let net_slice = inner_packet.net?;
-                    let LaxNetSlice::Ipv4(ip_slice) = net_slice else {
-                        return None;
-                    };
-
-                    let original_destination = ip_slice.header().destination_addr();
-                    self.get_key(
-                        inner_packet.transport?,
-                        original_destination,
-                        is_outward,
-                        !reversed,
-                    )
+            IpProtocol::ICMP => {
+                let (icmp, _, rest_icmp) = ValidIcmpV4::parse(rest).ok()?;
+                match icmp.ty() {
+                    ty if ty.payload_is_packet() => {
+                        let (ipv4, _, rest_ipv4) = ValidIpv4::parse(rest_icmp).ok()?;
+                        let original_destination = ipv4.destination().into();
+                        Self::get_key(
+                            ipv4.protocol(),
+                            rest_ipv4,
+                            original_destination,
+                            is_outward,
+                            !reversed,
+                        )
+                    }
+                    IcmpV4Type::ECHO_REQUEST
+                    | IcmpV4Type::ECHO_REPLY
+                    | IcmpV4Type::TIMESTAMP
+                    | IcmpV4Type::TIMESTAMP_REPLY => {
+                        let id_slice = &icmp.rest_of_hdr()[0..2];
+                        let id = u16::from_be_bytes(id_slice.try_into().unwrap());
+                        Some(NatKey::new(
+                            Protocol::Icmp,
+                            id,
+                            is_outward.then_some(source),
+                        ))
+                    }
+                    _ => None,
                 }
-                etherparse::Icmpv4Type::EchoRequest(echo)
-                | etherparse::Icmpv4Type::EchoReply(echo) => Some(NatKey::new(
-                    Protocol::Icmp,
-                    echo.id,
-                    is_outward.then_some(source),
-                )),
-                etherparse::Icmpv4Type::TimestampRequest(timestamp)
-                | etherparse::Icmpv4Type::TimestampReply(timestamp) => Some(NatKey::new(
-                    Protocol::Icmp,
-                    timestamp.id,
-                    is_outward.then_some(source),
-                )),
-            },
-            etherparse::TransportSlice::Icmpv6(_) => None,
+            }
+            _ => None,
         }
     }
 }

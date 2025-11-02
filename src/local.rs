@@ -1,52 +1,55 @@
 use std::net::Ipv4Addr;
 
-use etherparse::{Icmpv4Slice, Icmpv4Type, Ipv4Slice, PacketBuilder, SlicedPacket, TransportSlice};
+use ingot::icmp::{IcmpV4Ref, IcmpV4Type, ValidIcmpV4};
+use ingot::ip::{IpProtocol, Ipv4Mut, Ipv4Ref, ValidIpv4};
+use ingot::types::HeaderParse;
 
-use crate::tunnel::TunnelManagerChannel;
+pub enum ProcessLocalResult {
+    Done,
+    WriteBack,
+    NotLocal,
+}
+
+impl From<Option<()>> for ProcessLocalResult {
+    fn from(value: Option<()>) -> Self {
+        match value {
+            Some(_) => ProcessLocalResult::WriteBack,
+            None => ProcessLocalResult::Done,
+        }
+    }
+}
 
 pub async fn process_local(
-    data: &[u8],
-    server_channel: &TunnelManagerChannel,
+    data: &mut [u8],
     address: Ipv4Addr,
-) -> bool {
-    let Ok(packet) = SlicedPacket::from_ip(data) else {
-        return false;
+) -> ProcessLocalResult {
+    let Ok((ipv4, _, rest)) = ValidIpv4::parse(data) else {
+        return ProcessLocalResult::NotLocal;
     };
 
-    let Some(net) = packet.net else {
-        return false;
-    };
-    let Some(ip) = net.ipv4_ref() else {
-        return false;
-    };
-    if ip.header().destination_addr() != address {
-        return false;
+    if Ipv4Addr::from(ipv4.destination()) != address {
+        return ProcessLocalResult::NotLocal;
     }
 
-    match packet.transport {
-        Some(TransportSlice::Icmpv4(icmp)) => {
-            process_local_icmp(ip, &icmp, server_channel).await;
+    match ipv4.protocol() {
+        IpProtocol::ICMP => {
+            process_local_icmp(ipv4, rest).await.into()
         }
-        _ => (),
+        _ => ProcessLocalResult::Done,
     }
-    true
 }
 
 async fn process_local_icmp(
-    ip: &Ipv4Slice<'_>,
-    icmp: &Icmpv4Slice<'_>,
-    server_channel: &TunnelManagerChannel,
+    mut ipv4: ValidIpv4<&mut [u8]>,
+    rest: &mut [u8],
 ) -> Option<()> {
-    let Icmpv4Type::EchoRequest(req) = icmp.icmp_type() else {
+    let (icmp, _, _) = ValidIcmpV4::parse(rest).ok()?;
+    if icmp.ty() != IcmpV4Type::ECHO_REQUEST {
         return None;
     };
 
-    let builder = PacketBuilder::ipv4(ip.header().destination(), ip.header().source(), 20)
-        .icmpv4_echo_reply(req.id, req.seq);
-
-    let mut result: Vec<u8> = Vec::with_capacity(builder.size(icmp.payload().len()));
-    builder.write(&mut result, icmp.payload()).unwrap();
-    server_channel.send(result).await.ok();
-
+    let original_sender = ipv4.source();
+    ipv4.set_source(ipv4.destination());
+    ipv4.set_destination(original_sender);
     Some(())
 }

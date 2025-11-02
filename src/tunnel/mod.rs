@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
+use ingot::ip::{Ipv4Ref, ValidIpv4};
+use ingot::types::HeaderParse;
 use tokio::time::{Duration, Instant};
 
 use boringtun::noise::errors::WireGuardError;
@@ -9,7 +11,6 @@ use boringtun::noise::handshake::parse_handshake_anon;
 use boringtun::noise::rate_limiter::RateLimiter;
 use boringtun::noise::{Index, Tunn, TunnResult};
 use boringtun::x25519::{PublicKey, StaticSecret};
-use etherparse::SlicedPacket;
 use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -73,7 +74,7 @@ pub struct TunnelManager {
 
     peers: HashMap<PublicKey, Mutex<TunnelPeerState>>,
     idx_to_peer: HashMap<u32, PublicKey>,
-    addr_to_peer: HashMap<Ipv4Addr, PublicKey>,
+    addr_to_peer: HashMap<[u8; 4], PublicKey>,
     is_single: bool,
 }
 
@@ -122,7 +123,7 @@ impl TunnelManager {
             };
             peer_state.insert(peer_public_key, Mutex::new(server_peer));
             idx_to_peer.insert(index, peer_public_key);
-            addr_to_peer.insert(peer.peer_address, peer_public_key);
+            addr_to_peer.insert(peer.peer_address.octets(), peer_public_key);
         }
 
         TunnelManager {
@@ -265,16 +266,16 @@ impl TunnelManager {
         data: &[u8],
         dst: &mut [u8],
     ) -> Option<()> {
-        let packet = SlicedPacket::from_ip(data).ok()?;
-        let net = packet.net?;
-        let ip = net.ipv4_ref()?;
-        let destination = ip.header().destination_addr();
+        let peer_mutex = {
+            let (ipv4, ..) = ValidIpv4::parse(data).ok()?;
+            let destination = ipv4.destination_ref();
 
-        let peer_mutex = if self.is_single {
-            self.peers.values().next()?
-        } else {
-            let mapping = self.addr_to_peer.get(&destination)?;
-            self.peers.get(mapping)?
+            if self.is_single {
+                self.peers.values().next()?
+            } else {
+                let mapping = self.addr_to_peer.get(&destination.octets())?;
+                self.peers.get(mapping)?
+            }
         };
 
         let mut peer = peer_mutex.lock().await;

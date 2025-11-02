@@ -45,18 +45,23 @@ async fn main() {
 
     loop {
         select! {
-            Some(data) = client_channel.recv() => {
-                if let Some(translated) = nat.translate_inward(&data) {
-                    server_channel.send(translated).await.ok();
+            Some(mut data) = client_channel.recv() => {
+                if nat.translate_inward(&mut data).is_some() {
+                    server_channel.send(data).await.ok();
                 }
             },
             Some(mut data) = server_channel.recv() => {
-                if process_local(&data, &server_channel, config.server.address).await {
-                    continue;
+                match process_local(&mut data, config.server.address).await {
+                    local::ProcessLocalResult::Done => continue,
+                    local::ProcessLocalResult::WriteBack => {
+                        server_channel.send(data).await.ok();
+                        continue;
+                    },
+                    local::ProcessLocalResult::NotLocal => (),
                 };
 
-                if let Some(translated) = nat.translate_outward(&mut data) {
-                    client_channel.send(translated).await.ok();
+                if nat.translate_outward(&mut data).is_some() {
+                    client_channel.send(data).await.ok();
                 }
             }
         }
