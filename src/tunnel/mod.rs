@@ -1,9 +1,8 @@
+use smoltcp::wire::Ipv4Packet;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::thread;
-use ingot::ip::{Ipv4Ref, ValidIpv4};
-use ingot::types::HeaderParse;
 use tokio::time::{Duration, Instant};
 
 use boringtun::noise::errors::WireGuardError;
@@ -267,12 +266,11 @@ impl TunnelManager {
         dst: &mut [u8],
     ) -> Option<()> {
         let peer_mutex = {
-            let (ipv4, ..) = ValidIpv4::parse(data).ok()?;
-            let destination = ipv4.destination_ref();
-
             if self.is_single {
                 self.peers.values().next()?
             } else {
+                let ipv4 = Ipv4Packet::new_unchecked(data);
+                let destination = ipv4.dst_addr();
                 let mapping = self.addr_to_peer.get(&destination.octets())?;
                 self.peers.get(mapping)?
             }

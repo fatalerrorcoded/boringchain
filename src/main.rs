@@ -2,9 +2,9 @@ use std::fs;
 use std::net::Ipv4Addr;
 
 pub mod config;
+pub mod local;
 pub mod nat;
 pub mod tunnel;
-pub mod local;
 
 use config::Config;
 use tokio::select;
