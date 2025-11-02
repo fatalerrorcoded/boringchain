@@ -219,20 +219,24 @@ impl AddressTranslator {
         let mut current_port = starting_port.wrapping_add(1);
         let now = Instant::now();
         while current_port != starting_port {
+            if current_port == starting_port {
+                return None;
+            }
+
             if current_port == 0 {
                 continue;
             }
 
-            let inward_key = NatKey::new(protocol, wanted_port, None);
+            let inward_key = NatKey::new(protocol, current_port, None);
             let (outward_key, is_stale) = match self.inward.get(&inward_key) {
                 Some(entry) => (entry.to_outward_key(), entry.is_stale(now)),
-                None => return Some(wanted_port),
+                None => return Some(current_port),
             };
 
             if is_stale {
                 self.inward.remove(&inward_key);
                 self.outward.remove(&outward_key);
-                return Some(wanted_port);
+                return Some(current_port);
             }
 
             current_port = current_port.wrapping_add(1);
