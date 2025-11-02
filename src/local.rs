@@ -1,8 +1,6 @@
 use std::net::Ipv4Addr;
 
-use ingot::icmp::{IcmpV4Ref, IcmpV4Type, ValidIcmpV4};
-use ingot::ip::{IpProtocol, Ipv4Mut, Ipv4Ref, ValidIpv4};
-use ingot::types::HeaderParse;
+use smoltcp::wire::{Icmpv4Message, Icmpv4Packet, IpProtocol, Ipv4Packet};
 
 pub enum ProcessLocalResult {
     Done,
@@ -19,37 +17,33 @@ impl From<Option<()>> for ProcessLocalResult {
     }
 }
 
-pub async fn process_local(
-    data: &mut [u8],
-    address: Ipv4Addr,
-) -> ProcessLocalResult {
-    let Ok((ipv4, _, rest)) = ValidIpv4::parse(data) else {
+pub async fn process_local(data: &mut [u8], address: Ipv4Addr) -> ProcessLocalResult {
+    let Ok(ipv4) = Ipv4Packet::new_checked(data) else {
         return ProcessLocalResult::NotLocal;
     };
 
-    if Ipv4Addr::from(ipv4.destination()) != address {
+    if ipv4.dst_addr() != address {
         return ProcessLocalResult::NotLocal;
     }
 
-    match ipv4.protocol() {
-        IpProtocol::ICMP => {
-            process_local_icmp(ipv4, rest).await.into()
-        }
+    match ipv4.next_header() {
+        IpProtocol::Icmp => process_local_icmp(ipv4).await.into(),
         _ => ProcessLocalResult::Done,
     }
 }
 
-async fn process_local_icmp(
-    mut ipv4: ValidIpv4<&mut [u8]>,
-    rest: &mut [u8],
-) -> Option<()> {
-    let (icmp, _, _) = ValidIcmpV4::parse(rest).ok()?;
-    if icmp.ty() != IcmpV4Type::ECHO_REQUEST {
+async fn process_local_icmp(mut ipv4: Ipv4Packet<&mut [u8]>) -> Option<()> {
+    let mut icmp = Icmpv4Packet::new_checked(ipv4.payload_mut()).ok()?;
+    if icmp.msg_type() != Icmpv4Message::EchoRequest {
         return None;
     };
 
-    let original_sender = ipv4.source();
-    ipv4.set_source(ipv4.destination());
-    ipv4.set_destination(original_sender);
+    icmp.set_msg_type(Icmpv4Message::EchoReply);
+    icmp.fill_checksum();
+
+    let original_src = ipv4.src_addr();
+    ipv4.set_src_addr(ipv4.dst_addr());
+    ipv4.set_dst_addr(original_src);
+    ipv4.fill_checksum();
     Some(())
 }
