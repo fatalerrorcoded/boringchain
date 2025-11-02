@@ -10,11 +10,25 @@ pub enum Protocol {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum TranslateState {
+    TcpBase,
+    TcpAck,
+    TcpSyn,
+    TcpSynAck,
+    TcpFin,
+    TcpFinAck,
+    TcpRst,
+    Udp,
+    Icmp,
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum ProtocolState {
     TcpSynSent,
     TcpSynReceived,
     TcpEstablished,
-    TcpClosing,
+    TcpFinWait,
+    TcpTimeWait,
     TcpClosed,
     Udp,
     UdpStream,
@@ -22,21 +36,45 @@ pub enum ProtocolState {
 }
 
 impl ProtocolState {
-    pub fn update_state(&mut self, new_state: Self) {
-        *self = match (*self, new_state) {
-            (ProtocolState::TcpSynSent, ProtocolState::TcpSynReceived) => new_state,
-            (ProtocolState::TcpSynReceived, ProtocolState::TcpEstablished) => new_state,
-            // any move from established to closing is allowed
+    pub fn new(state: TranslateState) -> Option<Self> {
+        match state {
+            TranslateState::TcpBase => None,
+            TranslateState::TcpAck => None,
+            TranslateState::TcpSyn => Some(ProtocolState::TcpSynSent),
+            TranslateState::TcpSynAck => Some(ProtocolState::TcpSynReceived),
+            TranslateState::TcpFin => None,
+            TranslateState::TcpFinAck => None,
+            TranslateState::TcpRst => None,
+            TranslateState::Udp => Some(ProtocolState::Udp),
+            TranslateState::Icmp => Some(ProtocolState::Icmp),
+        }
+    }
+
+    pub fn update_state(&mut self, translate_state: TranslateState) {
+        use ProtocolState as PS;
+        use TranslateState as TS;
+        let old = self.clone();
+        *self = match (*self, translate_state) {
+            (PS::TcpSynSent, TS::TcpSynAck) => PS::TcpSynReceived,
+            (PS::TcpSynReceived, TS::TcpAck) => PS::TcpEstablished,
+            // any move from established to FinWait and TimeWait is allowed
+            (PS::TcpSynSent | PS::TcpSynReceived | PS::TcpEstablished, TS::TcpFin) => {
+                PS::TcpFinWait
+            }
             (
-                ProtocolState::TcpSynSent
-                | ProtocolState::TcpSynReceived
-                | ProtocolState::TcpEstablished,
-                ProtocolState::TcpClosing | ProtocolState::TcpClosed,
-            ) => new_state,
-            // an ack received when closing means that we have finished closing
-            (ProtocolState::TcpClosing, ProtocolState::TcpEstablished) => ProtocolState::TcpClosed,
+                PS::TcpSynSent | PS::TcpSynReceived | PS::TcpEstablished | PS::TcpFinWait,
+                TS::TcpFinAck,
+            ) => PS::TcpTimeWait,
+            // an ack received when in TimeWait means that we have finished closing
+            (PS::TcpTimeWait, TS::TcpAck) => PS::TcpClosed,
+            // allow moving from closed back into TimeWait if we see another FinAck
+            (PS::TcpClosed, TS::TcpFinAck) => PS::TcpTimeWait,
+            // allow resetting from closed state
+            // HACK: this should only be for TcpSynSent, but that can cause issues right now because
+            //       we don't track TCP connections per ip:port, only per port
+            (PS::TcpClosed, TS::TcpBase | TS::TcpAck) => PS::TcpEstablished,
             // a second UDP packet means we have likely established a stream
-            (ProtocolState::Udp, ProtocolState::Udp) => ProtocolState::UdpStream,
+            (PS::Udp, TS::Udp) => PS::UdpStream,
             _ => *self,
         };
     }
@@ -92,8 +130,10 @@ impl NatEntry {
             ProtocolState::TcpSynSent => Duration::from_secs(5),
             ProtocolState::TcpSynReceived => Duration::from_secs(5),
             ProtocolState::TcpEstablished => Duration::from_hours(2),
-            ProtocolState::TcpClosing => Duration::from_secs(10),
-            ProtocolState::TcpClosed => Duration::from_secs(10),
+            // HACK: closing states are intentionally longer because of how the TCP connection tracking works
+            ProtocolState::TcpFinWait => Duration::from_mins(1),
+            ProtocolState::TcpTimeWait => Duration::from_mins(1),
+            ProtocolState::TcpClosed => Duration::from_mins(1),
             ProtocolState::Udp => Duration::from_secs(30),
             ProtocolState::UdpStream => Duration::from_mins(2),
             ProtocolState::Icmp => Duration::from_secs(10),
