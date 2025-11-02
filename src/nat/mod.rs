@@ -36,7 +36,7 @@ impl AddressTranslator {
         let entry = self.outward.get_mut(&key);
 
         if let Some(entry) = entry && !entry.is_stale(Instant::now()) {
-            let new_state = Self::translate_packet(
+            let translate_state = Self::translate_packet(
                 &mut ipv4,
                 Some(self.public_address),
                 None,
@@ -44,14 +44,14 @@ impl AddressTranslator {
                 None,
             )?;
 
-            entry.protocol_state.update_state(new_state);
+            entry.protocol_state.update_state(translate_state);
             entry.last_activity = Instant::now();
             self.inward.insert(entry.to_inward_key(), entry.clone());
             return Some(());
         }
 
         let external_port = self.get_free_external_port(key.protocol, key.port)?;
-        let protocol_state = Self::translate_packet(
+        let translate_state = Self::translate_packet(
             &mut ipv4,
             Some(self.public_address),
             None,
@@ -61,7 +61,7 @@ impl AddressTranslator {
 
         let entry = NatEntry {
             protocol: key.protocol,
-            protocol_state,
+            protocol_state: ProtocolState::new(translate_state)?,
             external_port,
             internal: SocketAddrV4::new(ip_source, key.port),
             last_activity: Instant::now(),
@@ -82,7 +82,7 @@ impl AddressTranslator {
             return None;
         }
 
-        let new_state = Self::translate_packet(
+        let translate_state = Self::translate_packet(
             &mut ipv4,
             None,
             Some(*entry.internal.ip()),
@@ -90,7 +90,7 @@ impl AddressTranslator {
             Some(entry.internal.port()),
         )?;
 
-        entry.protocol_state.update_state(new_state);
+        entry.protocol_state.update_state(translate_state);
         entry.last_activity = Instant::now();
         self.outward.insert(entry.to_outward_key(), entry.clone());
         Some(())
@@ -223,7 +223,7 @@ impl AddressTranslator {
         dest: Option<Ipv4Addr>,
         src_port: Option<u16>,
         dest_port: Option<u16>,
-    ) -> Option<ProtocolState> {
+    ) -> Option<TranslateState> {
         if let Some(src) = src {
             ipv4.set_src_addr(src);
         }
@@ -247,12 +247,13 @@ impl AddressTranslator {
 
                 tcp.fill_checksum(src_addr, dst_addr);
                 match tcp {
-                    _ if tcp.rst() => Some(ProtocolState::TcpClosed),
-                    _ if tcp.fin() && tcp.ack() => Some(ProtocolState::TcpClosing),
-                    _ if tcp.fin() => Some(ProtocolState::TcpClosing),
-                    _ if tcp.syn() && tcp.ack() => Some(ProtocolState::TcpSynReceived),
-                    _ if tcp.syn() => Some(ProtocolState::TcpSynSent),
-                    _ => Some(ProtocolState::TcpEstablished),
+                    _ if tcp.rst() => Some(TranslateState::TcpRst),
+                    _ if tcp.fin() && tcp.ack() => Some(TranslateState::TcpFinAck),
+                    _ if tcp.fin() => Some(TranslateState::TcpFin),
+                    _ if tcp.syn() && tcp.ack() => Some(TranslateState::TcpSynAck),
+                    _ if tcp.syn() => Some(TranslateState::TcpSyn),
+                    _ if tcp.ack() => Some(TranslateState::TcpAck),
+                    _ => Some(TranslateState::TcpBase),
                 }
             }
             IpProtocol::Udp => {
@@ -264,7 +265,7 @@ impl AddressTranslator {
                     udp.set_dst_port(dest_port);
                 }
                 udp.fill_checksum(src_addr, dst_addr);
-                Some(ProtocolState::Udp)
+                Some(TranslateState::Udp)
             }
             IpProtocol::Icmp => {
                 let mut icmp = Icmpv4Packet::new_unchecked(ipv4.payload_mut());
@@ -296,7 +297,7 @@ impl AddressTranslator {
                             icmp.set_echo_ident(new_id);
                         }
                         icmp.fill_checksum();
-                        Some(ProtocolState::Icmp)
+                        Some(TranslateState::Icmp)
                     }
                     _ => None,
                 }
