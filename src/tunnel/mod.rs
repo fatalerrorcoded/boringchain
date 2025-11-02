@@ -1,9 +1,9 @@
 use smoltcp::wire::Ipv4Packet;
+use tokio::sync::mpsc::error::TrySendError;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::thread;
-use tokio::time::{Duration, Instant};
+use tokio::time::{self, Duration, Instant};
 
 use boringtun::noise::errors::WireGuardError;
 use boringtun::noise::handshake::parse_handshake_anon;
@@ -22,6 +22,10 @@ use crate::config::ConfigServerPeer;
 
 const MAX_UDP_SIZE: usize = (1 << 16) - 1;
 const HANDSHAKE_RATE_LIMIT: u64 = 100; // The number of handshakes per second we can tolerate before using cookies
+
+const IN_BUF_SIZE: usize = 256;
+const OUT_BUF_SIZE: usize = 128;
+const TIMER_TASK_BUF_SIZE: usize = 32;
 
 #[derive(Clone)]
 pub struct TunnelPeer {
@@ -139,9 +143,9 @@ impl TunnelManager {
     }
 
     pub async fn run(self: Arc<Self>) -> TunnelManagerChannel {
-        let (send_out, recv_out) = mpsc::channel(16);
-        let (send_in, recv_in) = mpsc::channel(16);
-        let (send_timer_pkt, recv_timer_pkt) = mpsc::channel(16);
+        let (send_out, recv_out) = mpsc::channel(OUT_BUF_SIZE);
+        let (send_in, recv_in) = mpsc::channel(IN_BUF_SIZE);
+        let (send_timer_pkt, recv_timer_pkt) = mpsc::channel(TIMER_TASK_BUF_SIZE);
 
         let _socket_task =
             tokio::task::spawn(self.clone().run_socket(recv_in, send_out, recv_timer_pkt));
@@ -242,7 +246,8 @@ impl TunnelManager {
             TunnResult::WriteToTunnelV4(packet, ipv4_addr) => {
                 // reject packets from a client if their address is different
                 if ipv4_addr == peer.def.peer_address || self.is_single {
-                    send_out.send(Vec::from(packet)).await.ok();
+                    // drop overflow
+                    send_out.try_send(Vec::from(packet)).ok();
                 }
             }
             TunnResult::WriteToTunnelV6(_, _) => (), // we do not support IPv6 (yet)
@@ -297,7 +302,7 @@ impl TunnelManager {
     async fn run_limiter_timer(self: Arc<Self>) {
         loop {
             self.rate_limiter.reset_count_at(Instant::now().into_std());
-            thread::sleep(Duration::from_secs(1));
+            time::sleep(Duration::from_secs(1)).await;
         }
     }
 
@@ -305,8 +310,7 @@ impl TunnelManager {
         let mut dst_buf = vec![0; MAX_UDP_SIZE];
         loop {
             for peer_mutex in self.peers.values() {
-                let mut peer = peer_mutex.lock().await;
-                let Some(socket_addr) = peer.endpoint else {
+                let Ok(mut peer) = peer_mutex.try_lock() else {
                     continue;
                 };
 
@@ -316,19 +320,25 @@ impl TunnelManager {
                 {
                     TunnResult::Done => (),
                     TunnResult::Err(WireGuardError::ConnectionExpired) => {
-                        peer.endpoint = peer.def.endpoint
+                        peer.endpoint = peer.def.endpoint;
                     }
                     TunnResult::Err(_) => (),
                     TunnResult::WriteToNetwork(packet) => {
-                        timer_pkt
-                            .send((socket_addr, Vec::from(packet)))
-                            .await
-                            .unwrap();
+                        let Some(socket_addr) = peer.endpoint else {
+                            continue;
+                        };
+
+                        match timer_pkt
+                            .try_send((socket_addr, Vec::from(packet))) {
+                                Ok(_) => (),
+                                Err(TrySendError::Full(_)) => todo!(), // drop
+                                Err(err) => panic!("Error on timer task: {:?}", err),
+                            }
                     }
                     _ => panic!("Unexpected result from update_timers"),
                 };
             }
-            thread::sleep(Duration::from_millis(250));
+            time::sleep(Duration::from_millis(250)).await;
         }
     }
 
