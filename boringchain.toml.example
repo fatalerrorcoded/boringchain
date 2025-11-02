@@ -1,0 +1,19 @@
+[client]
+private_key = "CLIENT_PRIVATE_KEY"
+listen_port = 51821
+address = "172.16.123.2"
+
+peer_public_key = "46mvFIWoAPXP6Tr0LU/3QdlW9YStGDb2rBeec0Rr/S4="
+peer_preshared_key = "hHiZab6FCtoW9X1Lh30zcXyr1XrqttKpOVWsAV1Lr0Y=" # optional
+peer_endpoint = "1.2.3.4:51820" # optional, should be provided
+
+[server]
+private_key = "SERVER_PRIVATE_KEY"
+listen_port = 51820
+address = "192.168.123.1"
+
+[[server.peer]]
+public_key = "J59LJ20aOeORMQamYiNB/KCgMHXyE2vVU50wao6yY2I="
+preshared_key = "hJFWQoRdoyOYHZxb7ycd2sAmgFpr9eHBBST5IzxBph4=" # optional
+endpoint = "1.2.3.4:51820" # optional
+peer_address = "192.168.123.2"
