@@ -216,13 +216,9 @@ impl AddressTranslator {
         }
 
         let starting_port: u16 = rand::random();
-        let mut current_port = starting_port.wrapping_add(1);
         let now = Instant::now();
-        while current_port != starting_port {
-            if current_port == starting_port {
-                return None;
-            }
-
+        for offset in 0..=u16::MAX {
+            let current_port = starting_port.wrapping_add(offset);
             if current_port == 0 {
                 continue;
             }
@@ -238,8 +234,6 @@ impl AddressTranslator {
                 self.outward.remove(&outward_key);
                 return Some(current_port);
             }
-
-            current_port = current_port.wrapping_add(1);
         }
 
         None
