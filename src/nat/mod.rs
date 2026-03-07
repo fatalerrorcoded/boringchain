@@ -282,8 +282,16 @@ impl AddressTranslator {
                     tcp.set_dst_port(dest_port);
                 }
 
-                tcp.set_checksum(Self::new_checksum_for_addr(tcp.checksum(), old_src, new_src));
-                tcp.set_checksum(Self::new_checksum_for_addr(tcp.checksum(), old_dst, new_dst));
+                tcp.set_checksum(Self::new_checksum_for_addr(
+                    tcp.checksum(),
+                    old_src,
+                    new_src,
+                ));
+                tcp.set_checksum(Self::new_checksum_for_addr(
+                    tcp.checksum(),
+                    old_dst,
+                    new_dst,
+                ));
                 match tcp {
                     _ if tcp.rst() => Some(TranslateState::TcpRst),
                     _ if tcp.fin() && tcp.ack() => Some(TranslateState::TcpFinAck),
@@ -313,8 +321,16 @@ impl AddressTranslator {
                     udp.set_dst_port(dest_port);
                 }
 
-                udp.set_checksum(Self::new_checksum_for_addr(udp.checksum(), old_src, new_src));
-                udp.set_checksum(Self::new_checksum_for_addr(udp.checksum(), old_dst, new_dst));
+                udp.set_checksum(Self::new_checksum_for_addr(
+                    udp.checksum(),
+                    old_src,
+                    new_src,
+                ));
+                udp.set_checksum(Self::new_checksum_for_addr(
+                    udp.checksum(),
+                    old_dst,
+                    new_dst,
+                ));
                 Some(TranslateState::Udp)
             }
             IpProtocol::Icmp => {

@@ -1,6 +1,13 @@
+#![warn(clippy::all)]
+#![warn(clippy::explicit_iter_loop)]
+#![warn(clippy::ignored_unit_patterns)]
+#![warn(clippy::unnecessary_debug_formatting)]
+#![warn(clippy::unreadable_literal)]
+#![warn(clippy::zero_sized_map_values)]
+
 use std::collections::HashMap;
-use std::{env, fs};
 use std::net::Ipv4Addr;
+use std::{env, fs};
 
 pub mod config;
 pub mod local;
@@ -19,7 +26,8 @@ async fn main() {
     let mut args = env::args_os();
     let config_path = args.nth(1).unwrap_or("./boringchain.toml".into());
 
-    let config_data = fs::read(&config_path).unwrap_or_else(|_| panic!("Failed to read config at {:?}", config_path));
+    let config_data = fs::read(&config_path)
+        .unwrap_or_else(|_| panic!("Failed to read config at {}", config_path.display()));
     let config: Config = toml::from_slice(&config_data).expect("Invalid config");
 
     let client_peer = TunnelPeer::new(
@@ -46,14 +54,14 @@ async fn main() {
     .await;
 
     let mut port_forward = HashMap::new();
-    for peer in config.server.peers.iter() {
-        for tcp_port in peer.tcp_port_forward.iter() {
+    for peer in &config.server.peers {
+        for tcp_port in &peer.tcp_port_forward {
             port_forward.insert((Protocol::Tcp, *tcp_port), peer.peer_address);
-        };
+        }
 
-        for udp_port in peer.udp_port_forward.iter() {
+        for udp_port in &peer.udp_port_forward {
             port_forward.insert((Protocol::Udp, *udp_port), peer.peer_address);
-        };
+        }
     }
     let mut nat = AddressTranslator::new(config.client.address, port_forward);
 

@@ -11,7 +11,7 @@ pub enum ProcessLocalResult {
 impl From<Option<()>> for ProcessLocalResult {
     fn from(value: Option<()>) -> Self {
         match value {
-            Some(_) => ProcessLocalResult::WriteBack,
+            Some(()) => ProcessLocalResult::WriteBack,
             None => ProcessLocalResult::Done,
         }
     }

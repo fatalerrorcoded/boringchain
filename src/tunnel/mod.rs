@@ -1,8 +1,8 @@
 use smoltcp::wire::Ipv4Packet;
-use tokio::sync::mpsc::error::TrySendError;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::{self, Duration, Instant};
 
 use boringtun::noise::errors::WireGuardError;
@@ -107,7 +107,7 @@ impl TunnelManager {
         let mut addr_to_peer = HashMap::new();
         for peer in peers {
             let peer_public_key = PublicKey::from(peer.public_key);
-            let index = rand::random::<u32>() & 0x00FFFFFF;
+            let index = rand::random::<u32>() & 0x00FF_FFFF;
             let tunnel = Tunn::new_at(
                 private_key.clone(),
                 peer_public_key,
@@ -328,12 +328,11 @@ impl TunnelManager {
                             continue;
                         };
 
-                        match timer_pkt
-                            .try_send((socket_addr, Vec::from(packet))) {
-                                Ok(_) => (),
-                                Err(TrySendError::Full(_)) => todo!(), // drop
-                                Err(err) => panic!("Error on timer task: {:?}", err),
-                            }
+                        match timer_pkt.try_send((socket_addr, Vec::from(packet))) {
+                            Ok(()) => (),
+                            Err(TrySendError::Full(_)) => todo!(), // drop
+                            Err(err) => panic!("Error on timer task: {:?}", err),
+                        }
                     }
                     _ => panic!("Unexpected result from update_timers"),
                 };
@@ -349,7 +348,7 @@ impl TunnelManager {
             Ok(mut addr) => {
                 let ipv4 = addr.clone().find(|addr| addr.is_ipv4());
                 ipv4.or_else(|| addr.next())
-            },
+            }
             Err(_) => {
                 println!("Failed to parse tunnel endpoint {}", endpoint);
                 None
